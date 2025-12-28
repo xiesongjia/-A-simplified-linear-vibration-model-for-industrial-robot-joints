@@ -1,0 +1,162 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.linalg import eig
+from scipy.integrate import solve_ivp
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# ====================== 1. 系统参数定义（工程典型值） ======================
+# 基本物理参数
+J1 = 0.5  # 转动惯量1 (kg·m²)
+J2 = 0.3  # 转动惯量2 (kg·m²)
+k1 = 100  # 扭转刚度1 (N·m/rad)
+k2 = 80  # 扭转刚度2 (N·m/rad)
+alpha = 0.1  # 质量比例阻尼系数（Rayleigh阻尼）
+beta = 0.001  # 刚度比例阻尼系数
+
+# 脉冲激励参数
+F0 = 50  # 脉冲力幅值 (N·m)
+t_pulse = 0.1  # 脉冲持续时间 (s)（矩形脉冲，0~t_pulse时间段有激励）
+t_total = 30  # 总仿真时间 从10s延长至30s
+dt = 0.01  # 时间步长
+
+# ====================== 2. 构建系统矩阵与固有特性 ======================
+# 质量矩阵 M
+M = np.array([
+    [J1, 0],
+    [0, J2]
+])
+
+# 刚度矩阵 K
+K = np.array([
+    [k1 + k2, -k2],
+    [-k2, k2]
+])
+
+# 阻尼矩阵 C (Rayleigh阻尼: C = αM + βK)
+C = alpha * M + beta * K
+
+# 求解固有频率和模态（用于验证）
+eigenvalues, eigenvectors = eig(K, M)
+omega_n = np.sqrt(np.real(eigenvalues))  # 无阻尼固有频率
+omega_n = np.sort(omega_n)
+print("===== 系统固有特性 =====")
+print(f"一阶固有频率 ω_n1 = {omega_n[0]:.2f} rad/s")
+print(f"二阶固有频率 ω_n2 = {omega_n[1]:.2f} rad/s")
+
+
+# ====================== 3. 定义脉冲激励函数 ======================
+def pulse_excitation(t):
+    """定义矩形脉冲激励：0~t_pulse时间段施加F0，其余时间为0"""
+    if 0 <= t <= t_pulse:
+        return np.array([F0, 0])  # 仅作用在第一个自由度
+    else:
+        return np.array([0, 0])
+
+
+# ====================== 4. 构建状态空间方程（时域求解核心） ======================
+def vibration_ode(t, y):
+    """
+    状态空间方程：将二阶微分方程转换为一阶方程组
+    y = [θ1, θ2, dθ1/dt, dθ2/dt]（状态向量：位移+速度）
+    返回 dy/dt = [dθ1/dt, dθ2/dt, d²θ1/dt², d²θ2/dt²]
+    """
+    # 提取状态变量
+    theta = y[:2]  # 位移：θ1, θ2
+    d_theta = y[2:]  # 速度：dθ1/dt, dθ2/dt
+
+    # 外激励
+    F = pulse_excitation(t)
+
+    # 二阶微分方程：M·d²θ/dt² + C·dθ/dt + K·θ = F
+    # 求解加速度：d²θ/dt² = M⁻¹·(F - C·dθ/dt - K·θ)
+    M_inv = np.linalg.inv(M)
+    dd_theta = M_inv @ (F - C @ d_theta - K @ theta)
+
+    # 返回一阶导数
+    return np.concatenate([d_theta, dd_theta])
+
+
+# ====================== 5. 求解微分方程（初始条件为0） ======================
+# 初始条件：y0 = [θ1(0), θ2(0), dθ1/dt(0), dθ2/dt(0)]
+y0 = np.array([0.0, 0.0, 0.0, 0.0])
+
+# 时间节点
+t_span = (0, t_total)
+t_eval = np.arange(0, t_total, dt)
+
+# 求解ODE（龙格-库塔法）
+sol = solve_ivp(
+    fun=vibration_ode,
+    t_span=t_span,
+    y0=y0,
+    t_eval=t_eval,
+    method='RK45',  # 高精度龙格-库塔法
+    rtol=1e-6,  # 相对误差
+    atol=1e-9  # 绝对误差
+)
+
+# 提取结果
+t = sol.t  # 时间数组
+theta1 = sol.y[0]  # θ1的位移响应
+theta2 = sol.y[1]  # θ2的位移响应
+d_theta1 = sol.y[2]  # θ1的速度
+d_theta2 = sol.y[3]  # θ2的速度
+
+# ====================== 6. 绘制振动响应曲线 ======================
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 支持中文
+plt.rcParams['axes.unicode_minus'] = False  # 支持负号
+
+# 创建2行1列的子图：位移响应 + 速度响应
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+
+# 子图1：位移-时间曲线（核心振动响应）
+ax1.plot(t, theta1, label=r'$\theta_1$ 位移', linewidth=2, color='#1f77b4')
+ax1.plot(t, theta2, label=r'$\theta_2$ 位移', linewidth=2, color='#ff7f0e', linestyle='--')
+# 标注脉冲激励时间段
+ax1.axvspan(0, t_pulse, color='red', alpha=0.1, label=f'脉冲激励时间段 (0~{t_pulse}s)')
+ax1.set_title('脉冲激励下二自由度系统位移响应（30s长时仿真）', fontsize=14, fontweight='bold')
+ax1.set_ylabel('位移 (rad)', fontsize=12)
+ax1.legend(loc='upper right', fontsize=10)
+ax1.grid(True, alpha=0.3)
+
+# 子图2：速度-时间曲线（辅助分析）
+ax2.plot(t, d_theta1, label=r'$\theta_1$ 速度', linewidth=2, color='#1f77b4')
+ax2.plot(t, d_theta2, label=r'$\theta_2$ 速度', linewidth=2, color='#ff7f0e', linestyle='--')
+ax2.axvspan(0, t_pulse, color='red', alpha=0.1)
+ax2.set_title('脉冲激励下二自由度系统速度响应（30s长时仿真）', fontsize=14, fontweight='bold')
+ax2.set_xlabel('时间 t (s)', fontsize=12)
+ax2.set_ylabel('角速度 (rad/s)', fontsize=12)
+ax2.legend(loc='upper right', fontsize=10)
+ax2.grid(True, alpha=0.3)
+ax2.set_xlim(0, t_total)
+
+# 调整布局并保存
+plt.tight_layout()
+plt.savefig('pulse_excitation_vibration_response_long_time.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# ====================== 7. 输出关键结果 ======================
+print("\n===== 脉冲激励振动响应关键结果 =====")
+# 最大位移
+max_theta1 = np.max(np.abs(theta1))
+max_theta2 = np.max(np.abs(theta2))
+t_max_theta1 = t[np.argmax(np.abs(theta1))]
+t_max_theta2 = t[np.argmax(np.abs(theta2))]
+print(f"θ1 最大位移：{max_theta1:.4f} rad (出现在 t={t_max_theta1:.2f}s)")
+print(f"θ2 最大位移：{max_theta2:.4f} rad (出现在 t={t_max_theta2:.2f}s)")
+
+# 振动衰减特性（取30s末的残余位移）
+theta1_final = np.abs(theta1[-1])
+theta2_final = np.abs(theta2[-1])
+print(f"t={t_total}s时，θ1 残余位移：{theta1_final:.6f} rad")
+print(f"t={t_total}s时，θ2 残余位移：{theta2_final:.6f} rad")
+
+# 额外输出15s、20s、25s的残余位移，观察衰减趋势
+t_check = [15, 20, 25]
+for t_c in t_check:
+    idx = np.argmin(np.abs(t - t_c))  # 找到最接近t_c的时间索引
+    theta1_c = np.abs(theta1[idx])
+    theta2_c = np.abs(theta2[idx])
+    print(f"t={t_c}s时，θ1 位移：{theta1_c:.6f} rad，θ2 位移：{theta2_c:.6f} rad")
